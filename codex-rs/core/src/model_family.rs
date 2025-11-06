@@ -38,6 +38,11 @@ pub struct ModelFamily {
     // Define if we need a special handling of reasoning summary
     pub reasoning_summary_format: ReasoningSummaryFormat,
 
+    // This should be set to true when the model expects a tool named
+    // "local_shell" to be provided. Its contract must be understood natively by
+    // the model such that its description can be omitted.
+    pub uses_local_shell_tool: bool,
+
     /// Whether this model supports parallel tool calls when using the
     /// Responses API.
     pub supports_parallel_tool_calls: bool,
@@ -80,6 +85,7 @@ macro_rules! model_family {
             needs_special_apply_patch_instructions: false,
             supports_reasoning_summaries: false,
             reasoning_summary_format: ReasoningSummaryFormat::None,
+            uses_local_shell_tool: false,
             supports_parallel_tool_calls: false,
             apply_patch_tool_type: None,
             base_instructions: BASE_INSTRUCTIONS.to_string(),
@@ -118,6 +124,7 @@ pub fn find_family_for_model(slug: &str) -> Option<ModelFamily> {
         model_family!(
             slug, "codex-mini-latest",
             supports_reasoning_summaries: true,
+            uses_local_shell_tool: true,
             needs_special_apply_patch_instructions: true,
             shell_type: ConfigShellToolType::Local,
         )
@@ -199,6 +206,19 @@ pub fn find_family_for_model(slug: &str) -> Option<ModelFamily> {
             needs_special_apply_patch_instructions: true,
             support_verbosity: true,
         )
+
+    // Third-party models accessed via responses proxy
+    } else if slug.contains("/") {
+        model_family!(
+            slug, slug,
+            apply_patch_tool_type: Some(ApplyPatchToolType::Function),
+            experimental_supported_tools: vec![
+                "grep_files".to_string(),
+                "list_dir".to_string(),
+                "read_file".to_string(),
+            ],
+            supports_parallel_tool_calls: true,
+        )
     } else {
         None
     }
@@ -211,14 +231,88 @@ pub fn derive_default_model_family(model: &str) -> ModelFamily {
         needs_special_apply_patch_instructions: false,
         supports_reasoning_summaries: false,
         reasoning_summary_format: ReasoningSummaryFormat::None,
-        supports_parallel_tool_calls: false,
-        apply_patch_tool_type: None,
+        uses_local_shell_tool: false,
+        supports_parallel_tool_calls: true,
+        apply_patch_tool_type: Some(ApplyPatchToolType::Function),
         base_instructions: BASE_INSTRUCTIONS.to_string(),
-        experimental_supported_tools: Vec::new(),
+        experimental_supported_tools: vec![
+            "grep_files".to_string(),
+            "list_dir".to_string(),
+            "read_file".to_string(),
+        ],
         effective_context_window_percent: 95,
         support_verbosity: false,
         shell_type: ConfigShellToolType::Default,
         default_verbosity: None,
         default_reasoning_effort: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_qwen_model_has_filesystem_tools() {
+        let model = "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8";
+        let family = find_family_for_model(model).expect("Qwen model should match");
+
+        // Should have filesystem tools
+        assert!(
+            family
+                .experimental_supported_tools
+                .contains(&"read_file".to_string())
+        );
+        assert!(
+            family
+                .experimental_supported_tools
+                .contains(&"list_dir".to_string())
+        );
+        assert!(
+            family
+                .experimental_supported_tools
+                .contains(&"grep_files".to_string())
+        );
+
+        // Should support parallel tool calls
+        assert!(family.supports_parallel_tool_calls);
+
+        // Should have Function apply_patch (compatible with Chat Completions API)
+        assert_eq!(
+            family.apply_patch_tool_type,
+            Some(ApplyPatchToolType::Function)
+        );
+    }
+
+    #[test]
+    fn test_default_model_family_has_filesystem_tools() {
+        let unknown = "some-unknown-model";
+        let family = derive_default_model_family(unknown);
+
+        // Default should also have filesystem tools
+        assert!(
+            family
+                .experimental_supported_tools
+                .contains(&"read_file".to_string())
+        );
+        assert!(
+            family
+                .experimental_supported_tools
+                .contains(&"list_dir".to_string())
+        );
+        assert!(
+            family
+                .experimental_supported_tools
+                .contains(&"grep_files".to_string())
+        );
+
+        // Should support parallel tool calls
+        assert!(family.supports_parallel_tool_calls);
+
+        // Should have Function apply_patch (compatible with Chat Completions API)
+        assert_eq!(
+            family.apply_patch_tool_type,
+            Some(ApplyPatchToolType::Function)
+        );
     }
 }

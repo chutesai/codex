@@ -51,7 +51,7 @@ impl ToolHandler for ListDirHandler {
     }
 
     async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
-        let ToolInvocation { payload, .. } = invocation;
+        let ToolInvocation { payload, turn, .. } = invocation;
 
         let arguments = match payload {
             ToolPayload::Function { arguments } => arguments,
@@ -94,15 +94,17 @@ impl ToolHandler for ListDirHandler {
         }
 
         let path = PathBuf::from(&dir_path);
-        if !path.is_absolute() {
-            return Err(FunctionCallError::RespondToModel(
-                "dir_path must be an absolute path".to_string(),
-            ));
-        }
 
-        let entries = list_dir_slice(&path, offset, limit, depth).await?;
+        // Resolve relative paths against the workspace CWD
+        let resolved_path = if path.is_absolute() {
+            path
+        } else {
+            turn.cwd.join(&path)
+        };
+
+        let entries = list_dir_slice(&resolved_path, offset, limit, depth).await?;
         let mut output = Vec::with_capacity(entries.len() + 1);
-        output.push(format!("Absolute path: {}", path.display()));
+        output.push(format!("Absolute path: {}", resolved_path.display()));
         output.extend(entries);
         Ok(ToolOutput::Function {
             content: output.join("\n"),

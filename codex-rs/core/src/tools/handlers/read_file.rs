@@ -96,7 +96,7 @@ impl ToolHandler for ReadFileHandler {
     }
 
     async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
-        let ToolInvocation { payload, .. } = invocation;
+        let ToolInvocation { payload, turn, .. } = invocation;
 
         let arguments = match payload {
             ToolPayload::Function { arguments } => arguments,
@@ -134,17 +134,19 @@ impl ToolHandler for ReadFileHandler {
         }
 
         let path = PathBuf::from(&file_path);
-        if !path.is_absolute() {
-            return Err(FunctionCallError::RespondToModel(
-                "file_path must be an absolute path".to_string(),
-            ));
-        }
+
+        // Resolve relative paths against the workspace CWD
+        let resolved_path = if path.is_absolute() {
+            path
+        } else {
+            turn.cwd.join(&path)
+        };
 
         let collected = match mode {
-            ReadMode::Slice => slice::read(&path, offset, limit).await?,
+            ReadMode::Slice => slice::read(&resolved_path, offset, limit).await?,
             ReadMode::Indentation => {
                 let indentation = indentation.unwrap_or_default();
-                indentation::read_block(&path, offset, limit, indentation).await?
+                indentation::read_block(&resolved_path, offset, limit, indentation).await?
             }
         };
         Ok(ToolOutput::Function {

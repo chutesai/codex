@@ -534,7 +534,7 @@ fn create_read_file_tool() -> ToolSpec {
     properties.insert(
         "file_path".to_string(),
         JsonSchema::String {
-            description: Some("Absolute path to the file".to_string()),
+            description: Some("Path to the file (absolute or relative to workspace)".to_string()),
         },
     );
     properties.insert(
@@ -632,7 +632,9 @@ fn create_list_dir_tool() -> ToolSpec {
     properties.insert(
         "dir_path".to_string(),
         JsonSchema::String {
-            description: Some("Absolute path to the directory to list.".to_string()),
+            description: Some(
+                "Path to the directory to list (absolute or relative to workspace)".to_string(),
+            ),
         },
     );
     properties.insert(
@@ -805,19 +807,29 @@ pub(crate) fn create_tools_json_for_chat_completions_api(
     let tools_json = responses_api_tools_json
         .into_iter()
         .filter_map(|mut tool| {
-            if tool.get("type") != Some(&serde_json::Value::String("function".to_string())) {
-                return None;
-            }
+            let tool_type = tool.get("type").and_then(|t| t.as_str());
 
-            if let Some(map) = tool.as_object_mut() {
-                // Remove "type" field as it is not needed in chat completions.
-                map.remove("type");
-                Some(json!({
-                    "type": "function",
-                    "function": map,
-                }))
-            } else {
-                None
+            match tool_type {
+                Some("function") => {
+                    if let Some(map) = tool.as_object_mut() {
+                        // Remove "type" field as it is not needed in chat completions.
+                        map.remove("type");
+                        Some(json!({
+                            "type": "function",
+                            "function": map,
+                        }))
+                    } else {
+                        None
+                    }
+                }
+                Some("web_search") => {
+                    // Pass through web_search as-is
+                    Some(tool)
+                }
+                _ => {
+                    // Filter out custom, local_shell, and other unsupported types
+                    None
+                }
             }
         })
         .collect::<Vec<serde_json::Value>>();
