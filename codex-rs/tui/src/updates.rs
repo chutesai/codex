@@ -104,6 +104,9 @@ fn is_newer(latest: &str, current: &str) -> Option<bool> {
 /// Returns the latest version to show in a popup, if it should be shown.
 /// This respects the user's dismissal choice for the current latest version.
 pub fn get_upgrade_version_for_popup(config: &Config) -> Option<String> {
+    // Skip version checks for custom fork
+    return None;
+    
     let version_file = version_filepath(config);
     let latest = get_upgrade_version(config)?;
     // If the user dismissed this exact version previously, do not show the popup.
