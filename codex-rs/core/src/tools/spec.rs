@@ -1,3 +1,4 @@
+use crate::client_common::tools::FreeformTool;
 use crate::client_common::tools::ResponsesApiTool;
 use crate::client_common::tools::ToolSpec;
 use crate::features::Feature;
@@ -801,39 +802,100 @@ pub fn create_tools_json_for_responses_api(
 pub(crate) fn create_tools_json_for_chat_completions_api(
     tools: &[ToolSpec],
 ) -> crate::error::Result<Vec<serde_json::Value>> {
-    // We start with the JSON for the Responses API and than rewrite it to match
-    // the chat completions tool call format.
-    let responses_api_tools_json = create_tools_json_for_responses_api(tools)?;
-    let tools_json = responses_api_tools_json
-        .into_iter()
-        .filter_map(|mut tool| {
-            let tool_type = tool.get("type").and_then(|t| t.as_str());
-
-            match tool_type {
-                Some("function") => {
-                    if let Some(map) = tool.as_object_mut() {
-                        // Remove "type" field as it is not needed in chat completions.
-                        map.remove("type");
-                        Some(json!({
-                            "type": "function",
-                            "function": map,
-                        }))
-                    } else {
-                        None
-                    }
-                }
-                Some("web_search") => {
-                    // Pass through web_search as-is
-                    Some(tool)
-                }
-                _ => {
-                    // Filter out custom, local_shell, and other unsupported types
-                    None
-                }
-            }
+    tools
+        .iter()
+        .map(|tool| match tool {
+            ToolSpec::Function(spec) => wrap_function_for_chat(spec),
+            ToolSpec::Freeform(spec) => Ok(freeform_tool_for_chat(spec)),
+            ToolSpec::LocalShell {} => local_shell_tool_for_chat(),
+            ToolSpec::WebSearch {} => Ok(json!({ "type": "web_search" })),
         })
-        .collect::<Vec<serde_json::Value>>();
-    Ok(tools_json)
+        .collect()
+}
+
+fn wrap_function_for_chat(tool: &ResponsesApiTool) -> crate::error::Result<serde_json::Value> {
+    let value = serde_json::to_value(tool)?;
+    let map = match value {
+        serde_json::Value::Object(map) => map,
+        _ => unreachable!("ResponsesApiTool should serialize to an object"),
+    };
+    Ok(json!({
+        "type": "function",
+        "function": map,
+    }))
+}
+
+fn freeform_tool_for_chat(tool: &FreeformTool) -> serde_json::Value {
+    let mut description = tool.description.clone();
+    if !tool.format.definition.is_empty() {
+        description.push_str("\n\nInput format:\n");
+        description.push_str(&tool.format.definition);
+    }
+    if !tool.format.syntax.is_empty() {
+        description.push_str("\n\nSyntax:\n");
+        description.push_str(&tool.format.syntax);
+    }
+
+    json!({
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "input": {
+                        "type": "string",
+                        "description": "Raw payload for the freeform tool call."
+                    }
+                },
+                "required": ["input"],
+                "additionalProperties": false
+            }
+        }
+    })
+}
+
+fn local_shell_tool_for_chat() -> crate::error::Result<serde_json::Value> {
+    let ToolSpec::Function(mut tool) = create_shell_tool() else {
+        unreachable!("create_shell_tool must return a function tool");
+    };
+    tool.name = "local_shell".to_string();
+    tool.description.push_str(
+        "\n\nExecutes commands on the end-user's local terminal without using a sandbox.",
+    );
+
+    if let JsonSchema::Object {
+        properties,
+        additional_properties,
+        ..
+    } = &mut tool.parameters
+    {
+        properties.insert(
+            "env".to_string(),
+            JsonSchema::Object {
+                properties: BTreeMap::new(),
+                required: None,
+                additional_properties: Some(
+                    JsonSchema::String {
+                        description: Some("Environment variable value".to_string()),
+                    }
+                    .into(),
+                ),
+            },
+        );
+        properties.insert(
+            "user".to_string(),
+            JsonSchema::String {
+                description: Some("User context to run the command as".to_string()),
+            },
+        );
+        if additional_properties.is_none() {
+            *additional_properties = Some(false.into());
+        }
+    }
+
+    wrap_function_for_chat(&tool)
 }
 
 pub(crate) fn mcp_tool_to_openai_tool(
@@ -1132,6 +1194,7 @@ pub(crate) fn build_specs(
 #[cfg(test)]
 mod tests {
     use crate::client_common::tools::FreeformTool;
+    use crate::client_common::tools::FreeformToolFormat;
     use crate::model_family::find_family_for_model;
     use crate::tools::registry::ConfiguredToolSpec;
     use mcp_types::ToolInputSchema;
@@ -1820,6 +1883,40 @@ mod tests {
                 strict: false,
             })
         );
+    }
+
+    #[test]
+    fn chat_tools_include_freeform_input_wrapper() {
+        let tools = vec![ToolSpec::Freeform(FreeformTool {
+            name: "demo_freeform".to_string(),
+            description: "demo description".to_string(),
+            format: FreeformToolFormat {
+                r#type: "text/plain".to_string(),
+                syntax: "plain text".to_string(),
+                definition: "Input MUST contain patches".to_string(),
+            },
+        })];
+        let chat_tools = create_tools_json_for_chat_completions_api(&tools)
+            .expect("freeform conversion succeeds");
+        assert_eq!(chat_tools.len(), 1);
+        let tool = &chat_tools[0];
+        assert_eq!(tool["type"], json!("function"));
+        assert_eq!(tool["function"]["name"], json!("demo_freeform"));
+        assert_eq!(tool["function"]["parameters"]["required"], json!(["input"]));
+    }
+
+    #[test]
+    fn chat_tools_include_local_shell_function() {
+        let tools = vec![ToolSpec::LocalShell {}];
+        let chat_tools = create_tools_json_for_chat_completions_api(&tools)
+            .expect("local shell conversion succeeds");
+        assert_eq!(chat_tools.len(), 1);
+        let tool = &chat_tools[0];
+        assert_eq!(tool["type"], json!("function"));
+        assert_eq!(tool["function"]["name"], json!("local_shell"));
+        let properties = &tool["function"]["parameters"]["properties"];
+        assert!(properties.get("command").is_some());
+        assert!(properties.get("env").is_some());
     }
 
     #[test]

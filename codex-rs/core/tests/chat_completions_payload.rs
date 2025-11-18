@@ -17,6 +17,7 @@ use core_test_support::load_default_config_for_test;
 use core_test_support::skip_if_no_network;
 use futures::StreamExt;
 use serde_json::Value;
+use serde_json::json;
 use tempfile::TempDir;
 use wiremock::Mock;
 use wiremock::MockServer;
@@ -171,6 +172,16 @@ fn local_shell_call() -> ResponseItem {
     }
 }
 
+fn custom_tool_call() -> ResponseItem {
+    ResponseItem::CustomToolCall {
+        id: None,
+        status: None,
+        call_id: "custom-call-id".to_string(),
+        name: "custom_tool".to_string(),
+        input: "payload".to_string(),
+    }
+}
+
 fn messages_from(body: &Value) -> Vec<Value> {
     match body["messages"].as_array() {
         Some(arr) => arr.clone(),
@@ -250,10 +261,17 @@ async fn attaches_reasoning_to_local_shell_call() {
     let assistant = first_assistant(&messages);
 
     assert_eq!(assistant["reasoning"], Value::String("rShell".into()));
+    let tool_call = &assistant["tool_calls"][0];
+    assert_eq!(tool_call["type"], Value::String("function".into()));
     assert_eq!(
-        assistant["tool_calls"][0]["type"],
-        Value::String("local_shell_call".into())
+        tool_call["function"]["name"],
+        Value::String("local_shell".into())
     );
+    let args = tool_call["function"]["arguments"]
+        .as_str()
+        .expect("arguments string");
+    let parsed_args: Value = serde_json::from_str(args).expect("valid json arguments");
+    assert_eq!(parsed_args["command"], json!(["echo"]));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -316,4 +334,24 @@ async fn suppresses_duplicate_assistant_messages() {
         assistant_messages[0]["content"],
         Value::String("dup".into())
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn custom_tool_calls_are_encoded_as_functions() {
+    skip_if_no_network!();
+
+    let body = run_request(vec![user_message("u1"), custom_tool_call()]).await;
+    let messages = messages_from(&body);
+    let assistant = first_assistant(&messages);
+    let call = &assistant["tool_calls"][0];
+    assert_eq!(call["type"], Value::String("function".into()));
+    assert_eq!(
+        call["function"]["name"],
+        Value::String("custom_tool".into())
+    );
+    let args = call["function"]["arguments"]
+        .as_str()
+        .expect("arguments string");
+    let parsed_args: Value = serde_json::from_str(args).expect("valid json");
+    assert_eq!(parsed_args["input"], Value::String("payload".into()));
 }

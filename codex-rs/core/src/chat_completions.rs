@@ -18,6 +18,8 @@ use bytes::Bytes;
 use codex_otel::otel_event_manager::OtelEventManager;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
+use codex_protocol::models::LocalShellAction;
+use codex_protocol::models::LocalShellExecAction;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::SessionSource;
@@ -137,7 +139,9 @@ pub(crate) async fn stream_chat_completions(
                 // Otherwise, attach to immediate next assistant anchor (tool-calls or assistant message)
                 if !attached && idx + 1 < input.len() {
                     match &input[idx + 1] {
-                        ResponseItem::FunctionCall { .. } | ResponseItem::LocalShellCall { .. } => {
+                        ResponseItem::FunctionCall { .. }
+                        | ResponseItem::LocalShellCall { .. }
+                        | ResponseItem::CustomToolCall { .. } => {
                             reasoning_by_anchor_index
                                 .entry(idx + 1)
                                 .and_modify(|v| v.push_str(&text))
@@ -240,19 +244,25 @@ pub(crate) async fn stream_chat_completions(
             }
             ResponseItem::LocalShellCall {
                 id,
-                call_id: _,
-                status,
+                call_id,
                 action,
+                ..
             } => {
-                // Confirm with API team.
+                let tool_call_id = call_id.clone().or_else(|| id.clone()).unwrap_or_default();
+                let arguments = match action {
+                    LocalShellAction::Exec(exec) => local_shell_arguments(exec),
+                };
+
                 let mut msg = json!({
                     "role": "assistant",
                     "content": null,
                     "tool_calls": [{
-                        "id": id.clone().unwrap_or_else(|| "".to_string()),
-                        "type": "local_shell_call",
-                        "status": status,
-                        "action": action,
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {
+                            "name": "local_shell",
+                            "arguments": arguments.to_string(),
+                        }
                     }]
                 });
                 if let Some(reasoning) = reasoning_by_anchor_index.get(&idx)
@@ -289,24 +299,29 @@ pub(crate) async fn stream_chat_completions(
                 }));
             }
             ResponseItem::CustomToolCall {
-                id,
-                call_id: _,
+                call_id,
                 name,
                 input,
-                status: _,
+                ..
             } => {
-                messages.push(json!({
+                let mut msg = json!({
                     "role": "assistant",
                     "content": null,
                     "tool_calls": [{
-                        "id": id,
-                        "type": "custom",
-                        "custom": {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
                             "name": name,
-                            "input": input,
+                            "arguments": json!({ "input": input }).to_string(),
                         }
                     }]
-                }));
+                });
+                if let Some(reasoning) = reasoning_by_anchor_index.get(&idx)
+                    && let Some(obj) = msg.as_object_mut()
+                {
+                    obj.insert("reasoning".to_string(), json!(reasoning));
+                }
+                messages.push(msg);
             }
             ResponseItem::CustomToolCallOutput { call_id, output } => {
                 messages.push(json!({
@@ -429,6 +444,24 @@ pub(crate) async fn stream_chat_completions(
             }
         }
     }
+}
+
+fn local_shell_arguments(action: &LocalShellExecAction) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    map.insert("command".to_string(), json!(action.command));
+    if let Some(workdir) = &action.working_directory {
+        map.insert("workdir".to_string(), json!(workdir));
+    }
+    if let Some(timeout) = action.timeout_ms {
+        map.insert("timeout_ms".to_string(), json!(timeout));
+    }
+    if let Some(env) = &action.env {
+        map.insert("env".to_string(), json!(env));
+    }
+    if let Some(user) = &action.user {
+        map.insert("user".to_string(), json!(user));
+    }
+    serde_json::Value::Object(map)
 }
 
 async fn append_assistant_text(
