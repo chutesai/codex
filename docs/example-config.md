@@ -19,11 +19,11 @@ Use this example configuration as a starting point. For an explanation of each f
 ################################################################################
 
 # Primary model used by Codex. Default differs by OS; non-Windows defaults here.
-# Linux/macOS default: "gpt-5-codex"; Windows default: "gpt-5".
-model = "gpt-5-codex"
+# Linux/macOS default: "gpt-5.1-codex"; Windows default: "gpt-5.1".
+model = "gpt-5.1-codex"
 
-# Model used by the /review feature (code reviews). Default: "gpt-5-codex".
-review_model = "gpt-5-codex"
+# Model used by the /review feature (code reviews). Default: "gpt-5.1-codex".
+review_model = "gpt-5.1-codex"
 
 # Provider id selected from [model_providers]. Default: "openai".
 model_provider = "openai"
@@ -136,8 +136,8 @@ file_opener = "vscode"
 ################################################################################
 
 [tui]
-# Desktop notifications from the TUI: boolean or filtered list. Default: false
-# Examples: true | ["agent-turn-complete", "approval-requested"]
+# Desktop notifications from the TUI: boolean or filtered list. Default: true
+# Examples: false | ["agent-turn-complete", "approval-requested"]
 notifications = false
 
 # Suppress internal reasoning events from output (default: false)
@@ -159,6 +159,7 @@ windows_wsl_setup_acknowledged = false
 # In-product notices (mostly set automatically by Codex).
 [notice]
 # hide_full_access_warning = true
+# hide_rate_limit_model_nudge = true
 
 ################################################################################
 # Authentication & Login
@@ -220,9 +221,6 @@ enable_experimental_windows_sandbox = false
 ################################################################################
 # Experimental toggles (legacy; prefer [features])
 ################################################################################
-
-# Use experimental exec command tool (streamable shell). Default: false
-experimental_use_exec_command_tool = false
 
 # Use experimental unified exec tool. Default: false
 experimental_use_unified_exec_tool = false
@@ -317,7 +315,7 @@ mcp_oauth_credentials_store = "auto"
 [profiles]
 
 # [profiles.default]
-# model = "gpt-5-codex"
+# model = "gpt-5.1-codex"
 # model_provider = "openai"
 # approval_policy = "on-request"
 # sandbox_mode = "read-only"
@@ -328,7 +326,6 @@ mcp_oauth_credentials_store = "auto"
 # experimental_compact_prompt_file = "compact_prompt.txt"
 # include_apply_patch_tool = false
 # experimental_use_unified_exec_tool = false
-# experimental_use_exec_command_tool = false
 # experimental_use_rmcp_client = false
 # experimental_use_freeform_apply_patch = false
 # experimental_sandbox_command_assessment = false

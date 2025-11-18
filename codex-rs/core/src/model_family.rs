@@ -1,10 +1,16 @@
+use codex_protocol::config_types::ReasoningEffort;
+use codex_protocol::config_types::Verbosity;
+
 use crate::config::types::ReasoningSummaryFormat;
 use crate::tools::handlers::apply_patch::ApplyPatchToolType;
+use crate::tools::spec::ConfigShellToolType;
 
 /// The `instructions` field in the payload sent to a model should always start
 /// with this content.
 const BASE_INSTRUCTIONS: &str = include_str!("../prompt.md");
+
 const GPT_5_CODEX_INSTRUCTIONS: &str = include_str!("../gpt_5_codex_prompt.md");
+const GPT_5_1_INSTRUCTIONS: &str = include_str!("../gpt_5_1_prompt.md");
 
 /// A model family is a group of models that share certain characteristics.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -26,13 +32,15 @@ pub struct ModelFamily {
     // `summary` is optional).
     pub supports_reasoning_summaries: bool,
 
+    // The reasoning effort to use for this model family when none is explicitly chosen.
+    pub default_reasoning_effort: Option<ReasoningEffort>,
+
     // Define if we need a special handling of reasoning summary
     pub reasoning_summary_format: ReasoningSummaryFormat,
 
     // This should be set to true when the model expects a tool named
     // "local_shell" to be provided. Its contract must be understood natively by
     // the model such that its description can be omitted.
-    // See https://platform.openai.com/docs/guides/tools-local-shell
     pub uses_local_shell_tool: bool,
 
     /// Whether this model supports parallel tool calls when using the
@@ -57,6 +65,12 @@ pub struct ModelFamily {
 
     /// If the model family supports setting the verbosity level when using Responses API.
     pub support_verbosity: bool,
+
+    // The default verbosity level for this model family when using Responses API.
+    pub default_verbosity: Option<Verbosity>,
+
+    /// Preferred shell tool type for this model family when features do not override it.
+    pub shell_type: ConfigShellToolType,
 }
 
 macro_rules! model_family {
@@ -64,6 +78,7 @@ macro_rules! model_family {
         $slug:expr, $family:expr $(, $key:ident : $value:expr )* $(,)?
     ) => {{
         // defaults
+        #[allow(unused_mut)]
         let mut mf = ModelFamily {
             slug: $slug.to_string(),
             family: $family.to_string(),
@@ -77,7 +92,11 @@ macro_rules! model_family {
             experimental_supported_tools: Vec::new(),
             effective_context_window_percent: 95,
             support_verbosity: false,
+            shell_type: ConfigShellToolType::Default,
+            default_verbosity: None,
+            default_reasoning_effort: None,
         };
+
         // apply overrides
         $(
             mf.$key = $value;
@@ -107,6 +126,7 @@ pub fn find_family_for_model(slug: &str) -> Option<ModelFamily> {
             supports_reasoning_summaries: true,
             uses_local_shell_tool: true,
             needs_special_apply_patch_instructions: true,
+            shell_type: ConfigShellToolType::Local,
         )
     } else if slug.starts_with("gpt-4.1") {
         model_family!(
@@ -119,7 +139,7 @@ pub fn find_family_for_model(slug: &str) -> Option<ModelFamily> {
         model_family!(slug, "gpt-4o", needs_special_apply_patch_instructions: true)
     } else if slug.starts_with("gpt-3.5") {
         model_family!(slug, "gpt-3.5", needs_special_apply_patch_instructions: true)
-    } else if slug.starts_with("test-gpt-5-codex") {
+    } else if slug.starts_with("test-gpt-5") {
         model_family!(
             slug, slug,
             supports_reasoning_summaries: true,
@@ -148,19 +168,36 @@ pub fn find_family_for_model(slug: &str) -> Option<ModelFamily> {
                 "list_dir".to_string(),
                 "read_file".to_string(),
             ],
+            shell_type: if cfg!(windows) { ConfigShellToolType::ShellCommand } else { ConfigShellToolType::Default },
             supports_parallel_tool_calls: true,
             support_verbosity: true,
         )
 
     // Production models.
-    } else if slug.starts_with("gpt-5-codex") || slug.starts_with("codex-") {
+    } else if slug.starts_with("gpt-5-codex")
+        || slug.starts_with("gpt-5.1-codex")
+        || slug.starts_with("codex-")
+    {
         model_family!(
             slug, slug,
             supports_reasoning_summaries: true,
             reasoning_summary_format: ReasoningSummaryFormat::Experimental,
             base_instructions: GPT_5_CODEX_INSTRUCTIONS.to_string(),
             apply_patch_tool_type: Some(ApplyPatchToolType::Freeform),
+            shell_type: if cfg!(windows) { ConfigShellToolType::ShellCommand } else { ConfigShellToolType::Default },
+            supports_parallel_tool_calls: true,
             support_verbosity: false,
+        )
+    } else if slug.starts_with("gpt-5.1") {
+        model_family!(
+            slug, "gpt-5.1",
+            supports_reasoning_summaries: true,
+            apply_patch_tool_type: Some(ApplyPatchToolType::Freeform),
+            support_verbosity: true,
+            default_verbosity: Some(Verbosity::Low),
+            base_instructions: GPT_5_1_INSTRUCTIONS.to_string(),
+            default_reasoning_effort: Some(ReasoningEffort::Medium),
+            supports_parallel_tool_calls: true,
         )
     } else if slug.starts_with("gpt-5") {
         model_family!(
@@ -205,6 +242,78 @@ pub fn derive_default_model_family(model: &str) -> ModelFamily {
         ],
         effective_context_window_percent: 95,
         support_verbosity: false,
+        shell_type: ConfigShellToolType::Default,
+        default_verbosity: None,
+        default_reasoning_effort: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_qwen_model_has_filesystem_tools() {
+        let model = "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8";
+        let family = find_family_for_model(model).expect("Qwen model should match");
+
+        // Should have filesystem tools
+        assert!(
+            family
+                .experimental_supported_tools
+                .contains(&"read_file".to_string())
+        );
+        assert!(
+            family
+                .experimental_supported_tools
+                .contains(&"list_dir".to_string())
+        );
+        assert!(
+            family
+                .experimental_supported_tools
+                .contains(&"grep_files".to_string())
+        );
+
+        // Should support parallel tool calls
+        assert!(family.supports_parallel_tool_calls);
+
+        // Should have Function apply_patch (compatible with Chat Completions API)
+        assert_eq!(
+            family.apply_patch_tool_type,
+            Some(ApplyPatchToolType::Function)
+        );
+    }
+
+    #[test]
+    fn test_default_model_family_has_filesystem_tools() {
+        let unknown = "some-unknown-model";
+        let family = derive_default_model_family(unknown);
+
+        // Default should also have filesystem tools
+        assert!(
+            family
+                .experimental_supported_tools
+                .contains(&"read_file".to_string())
+        );
+        assert!(
+            family
+                .experimental_supported_tools
+                .contains(&"list_dir".to_string())
+        );
+        assert!(
+            family
+                .experimental_supported_tools
+                .contains(&"grep_files".to_string())
+        );
+
+        // Should support parallel tool calls
+        assert!(family.supports_parallel_tool_calls);
+
+        // Should have Function apply_patch (compatible with Chat Completions API)
+        assert_eq!(
+            family.apply_patch_tool_type,
+            Some(ApplyPatchToolType::Function)
+        );
     }
 }
 
