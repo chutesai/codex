@@ -16,8 +16,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BUILD_SCRIPT = REPO_ROOT / "codex-cli" / "scripts" / "build_npm_package.py"
 INSTALL_NATIVE_DEPS = REPO_ROOT / "codex-cli" / "scripts" / "install_native_deps.py"
-WORKFLOW_NAME = ".github/workflows/rust-release.yml"
-GITHUB_REPO = "openai/codex"
+WORKFLOW_NAME = os.environ.get("CODEX_RELEASE_WORKFLOW", ".github/workflows/rust-release.yml")
+RELEASE_REPO = os.environ.get("CODEX_RELEASE_REPO", "openai/codex")
 
 _SPEC = importlib.util.spec_from_file_location("codex_build_npm_package", BUILD_SCRIPT)
 if _SPEC is None or _SPEC.loader is None:
@@ -72,6 +72,8 @@ def resolve_release_workflow(version: str) -> dict:
             "gh",
             "run",
             "list",
+            "--repo",
+            RELEASE_REPO,
             "--branch",
             f"rust-v{version}",
             "--json",
