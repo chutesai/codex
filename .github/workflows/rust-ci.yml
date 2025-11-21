@@ -61,7 +61,23 @@ jobs:
         with:
           components: rustfmt
       - name: cargo fmt
-        run: cargo fmt -- --config imports_granularity=Item --check
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! cargo fmt -- --config imports_granularity=Item --check; then
+            {
+              echo "## cargo fmt diff";
+              echo;
+              echo "\`\`\`";
+              git status --short
+              echo "\`\`\`";
+              echo;
+              echo "\`\`\`diff";
+              git diff
+              echo "\`\`\`";
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
       - name: Verify codegen for mcp-types
         run: ./mcp-types/check_lib_rs.py
 
