@@ -143,7 +143,7 @@ fn extract_version_from_latest_tag(latest_tag_name: &str) -> anyhow::Result<Stri
 pub fn get_upgrade_version_for_popup(config: &Config) -> Option<String> {
     // Skip version checks for custom fork
     return None;
-    
+
     let version_file = version_filepath(config);
     let latest = get_upgrade_version(config)?;
     // If the user dismissed this exact version previously, do not show the popup.
