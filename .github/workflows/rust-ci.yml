@@ -65,6 +65,10 @@ jobs:
         run: |
           set -euo pipefail
           if ! cargo fmt -- --config imports_granularity=Item --check; then
+            while IFS= read -r -d '' entry; do
+              file="${entry:3}"
+              echo "::error file=${file}::cargo fmt would rewrite ${file}"
+            done < <(git status --porcelain -z)
             {
               echo "## cargo fmt diff";
               echo;
