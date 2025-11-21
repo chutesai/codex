@@ -1,4 +1,7 @@
 name: rust-ci
+permissions:
+  contents: write
+  actions: read
 on:
   pull_request: {}
   push:
@@ -562,9 +565,62 @@ jobs:
           path: codex-rs/artifacts/${{ matrix.artifact_name }}
 
   # --- Gatherer job that you mark as the ONLY required status -----------------
+  publish_release_assets:
+    name: Publish nightly release assets
+    runs-on: ubuntu-24.04
+    needs: build_binaries
+    if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.build_binaries.result == 'success' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Download binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: codex-*
+          path: release-artifacts
+          merge-multiple: false
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          shopt -s nullglob
+          count=0
+          for dir in release-artifacts/*; do
+            name="$(basename "$dir")"
+            if [[ -f "$dir/codex.exe" ]]; then
+              cp "$dir/codex.exe" "release-assets/${name}.exe"
+            elif [[ -f "$dir/codex" ]]; then
+              cp "$dir/codex" "release-assets/${name}"
+              chmod +x "release-assets/${name}"
+            else
+              echo "::error::No codex binary found in $dir"
+              exit 1
+            fi
+            count=$((count + 1))
+          done
+          if [[ $count -eq 0 ]]; then
+            echo "::error::No artifacts available to publish."
+            exit 1
+          fi
+      - name: Ensure nightly release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! gh release view nightly >/dev/null 2>&1; then
+            gh release create nightly --prerelease --title "Nightly builds" --notes "Latest successful CI binaries."
+          fi
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release upload nightly release-assets/* --clobber
+
   results:
     name: CI results (required)
-    needs: [changed, general, cargo_shear, lint_build, tests, build_binaries]
+    needs: [changed, general, cargo_shear, lint_build, tests, build_binaries, publish_release_assets]
     if: always()
     runs-on: ubuntu-24.04
     steps:
@@ -576,6 +632,7 @@ jobs:
           echo "lint   : ${{ needs.lint_build.result }}"
           echo "tests  : ${{ needs.tests.result }}"
           echo "bins   : ${{ needs.build_binaries.result }}"
+          echo "release: ${{ needs.publish_release_assets.result }}"
 
           # If nothing relevant changed (PR touching only root README, etc.),
           # declare success regardless of other jobs.
@@ -590,6 +647,9 @@ jobs:
           [[ '${{ needs.lint_build.result }}' == 'success' ]] || { echo 'lint_build failed'; exit 1; }
           [[ '${{ needs.tests.result }}' == 'success' ]] || { echo 'tests failed'; exit 1; }
           [[ '${{ needs.build_binaries.result }}' == 'success' ]] || { echo 'build_binaries failed'; exit 1; }
+          if [[ '${{ github.event_name }}' == 'push' || '${{ github.event_name }}' == 'workflow_dispatch' ]]; then
+            [[ '${{ needs.publish_release_assets.result }}' == 'success' ]] || { echo 'publish_release_assets failed'; exit 1; }
+          fi
 
       - name: sccache summary note
         if: always()
