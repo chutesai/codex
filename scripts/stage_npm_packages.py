@@ -17,7 +17,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 BUILD_SCRIPT = REPO_ROOT / "codex-cli" / "scripts" / "build_npm_package.py"
 INSTALL_NATIVE_DEPS = REPO_ROOT / "codex-cli" / "scripts" / "install_native_deps.py"
 WORKFLOW_NAME = os.environ.get("CODEX_RELEASE_WORKFLOW", ".github/workflows/rust-release.yml")
-RELEASE_REPO = os.environ.get("CODEX_RELEASE_REPO", "openai/codex")
+DEFAULT_RELEASE_REPOS = [
+    os.environ.get("CODEX_RELEASE_REPO"),
+    os.environ.get("GITHUB_REPOSITORY"),
+    "chutesai/codex",
+    "openai/codex",
+]
+DEFAULT_RELEASE_REPOS = [repo for repo in DEFAULT_RELEASE_REPOS if repo]
 
 _SPEC = importlib.util.spec_from_file_location("codex_build_npm_package", BUILD_SCRIPT)
 if _SPEC is None or _SPEC.loader is None:
@@ -66,37 +72,55 @@ def collect_native_components(packages: list[str]) -> set[str]:
     return components
 
 
-def resolve_release_workflow(version: str) -> dict:
-    stdout = subprocess.check_output(
-        [
-            "gh",
-            "run",
-            "list",
-            "--repo",
-            RELEASE_REPO,
-            "--branch",
-            f"rust-v{version}",
-            "--json",
-            "workflowName,url,headSha",
-            "--workflow",
-            WORKFLOW_NAME,
-            "--jq",
-            "first(.[])",
-        ],
-        cwd=REPO_ROOT,
-        text=True,
-    )
+def resolve_release_workflow(version: str, repo: str) -> dict | None:
+    try:
+        stdout = subprocess.check_output(
+            [
+                "gh",
+                "run",
+                "list",
+                "--repo",
+                repo,
+                "--branch",
+                f"rust-v{version}",
+                "--json",
+                "workflowName,url,headSha",
+                "--workflow",
+                WORKFLOW_NAME,
+                "--jq",
+                "first(.[])",
+            ],
+            cwd=REPO_ROOT,
+            text=True,
+        )
+    except subprocess.CalledProcessError:
+        return None
+
     workflow = json.loads(stdout or "null")
     if not workflow:
-        raise RuntimeError(f"Unable to find rust-release workflow for version {version}.")
+        return None
     return workflow
+
+
+def resolve_release_workflow_with_fallback(version: str) -> tuple[dict | None, str | None]:
+    for repo in DEFAULT_RELEASE_REPOS:
+        workflow = resolve_release_workflow(version, repo)
+        if workflow:
+            return workflow, repo
+    return None, None
 
 
 def resolve_workflow_url(version: str, override: str | None) -> tuple[str, str | None]:
     if override:
         return override, None
 
-    workflow = resolve_release_workflow(version)
+    workflow, repo = resolve_release_workflow_with_fallback(version)
+    if not workflow or not repo:
+        checked = ", ".join(DEFAULT_RELEASE_REPOS) or "<none>"
+        raise RuntimeError(
+            f"Unable to find rust-release workflow for version {version}. Checked repos: {checked}"
+        )
+    print(f"Using release artifacts from {repo}")
     return workflow["url"], workflow.get("headSha")
 
 
