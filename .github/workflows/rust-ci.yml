@@ -469,10 +469,57 @@ jobs:
           echo "Tests failed. See logs for details."
           exit 1
 
+  build_binaries:
+    name: Binary artifacts — ${{ matrix.artifact_name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    needs: changed
+    if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push' }}
+    defaults:
+      run:
+        working-directory: codex-rs
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            artifact_name: codex-linux-x86_64
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: codex-windows-x86_64
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.90
+        with:
+          targets: ${{ matrix.target }}
+      - name: cargo build (release)
+        run: cargo build --target ${{ matrix.target }} --release --bin codex
+      - name: Stage binary (Linux)
+        if: ${{ !startsWith(matrix.runner, 'windows') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          dest="artifacts/${{ matrix.artifact_name }}"
+          mkdir -p "$dest"
+          cp "target/${{ matrix.target }}/release/codex" "$dest/codex"
+      - name: Stage binary (Windows)
+        if: ${{ startsWith(matrix.runner, 'windows') }}
+        shell: pwsh
+        run: |
+          $dest = "artifacts/${{ matrix.artifact_name }}"
+          New-Item -ItemType Directory -Path $dest -Force | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/codex.exe" "$dest/codex.exe"
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: codex-rs/artifacts/${{ matrix.artifact_name }}
+
   # --- Gatherer job that you mark as the ONLY required status -----------------
   results:
     name: CI results (required)
-    needs: [changed, general, cargo_shear, lint_build, tests]
+    needs: [changed, general, cargo_shear, lint_build, tests, build_binaries]
     if: always()
     runs-on: ubuntu-24.04
     steps:
@@ -483,6 +530,7 @@ jobs:
           echo "shear  : ${{ needs.cargo_shear.result }}"
           echo "lint   : ${{ needs.lint_build.result }}"
           echo "tests  : ${{ needs.tests.result }}"
+          echo "bins   : ${{ needs.build_binaries.result }}"
 
           # If nothing relevant changed (PR touching only root README, etc.),
           # declare success regardless of other jobs.
@@ -496,6 +544,7 @@ jobs:
           [[ '${{ needs.cargo_shear.result }}' == 'success' ]] || { echo 'cargo_shear failed'; exit 1; }
           [[ '${{ needs.lint_build.result }}' == 'success' ]] || { echo 'lint_build failed'; exit 1; }
           [[ '${{ needs.tests.result }}' == 'success' ]] || { echo 'tests failed'; exit 1; }
+          [[ '${{ needs.build_binaries.result }}' == 'success' ]] || { echo 'build_binaries failed'; exit 1; }
 
       - name: sccache summary note
         if: always()
