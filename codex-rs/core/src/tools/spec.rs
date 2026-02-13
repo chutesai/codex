@@ -962,7 +962,9 @@ fn create_read_file_tool() -> ToolSpec {
         (
             "file_path".to_string(),
             JsonSchema::String {
-                description: Some("Absolute path to the file".to_string()),
+                description: Some(
+                    "Path to the file (absolute or relative to workspace CWD)".to_string(),
+                ),
             },
         ),
         (
@@ -1018,7 +1020,10 @@ fn create_list_dir_tool() -> ToolSpec {
         (
             "dir_path".to_string(),
             JsonSchema::String {
-                description: Some("Absolute path to the directory to list.".to_string()),
+                description: Some(
+                    "Path to the directory to list (absolute or relative to workspace CWD)."
+                        .to_string(),
+                ),
             },
         ),
         (

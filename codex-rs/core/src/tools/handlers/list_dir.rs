@@ -37,6 +37,7 @@ fn default_depth() -> usize {
 
 #[derive(Deserialize)]
 struct ListDirArgs {
+    /// Path to the directory to list (absolute or relative to workspace CWD).
     dir_path: String,
     #[serde(default = "default_offset")]
     offset: usize,
@@ -53,7 +54,7 @@ impl ToolHandler for ListDirHandler {
     }
 
     async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
-        let ToolInvocation { payload, .. } = invocation;
+        let ToolInvocation { payload, turn, .. } = invocation;
 
         let arguments = match payload {
             ToolPayload::Function { arguments } => arguments,
@@ -91,12 +92,7 @@ impl ToolHandler for ListDirHandler {
             ));
         }
 
-        let path = PathBuf::from(&dir_path);
-        if !path.is_absolute() {
-            return Err(FunctionCallError::RespondToModel(
-                "dir_path must be an absolute path".to_string(),
-            ));
-        }
+        let path = resolve_workspace_path(&dir_path, &turn.cwd);
 
         let entries = list_dir_slice(&path, offset, limit, depth).await?;
         let mut output = Vec::with_capacity(entries.len() + 1);
@@ -106,6 +102,15 @@ impl ToolHandler for ListDirHandler {
             body: FunctionCallOutputBody::Text(output.join("\n")),
             success: Some(true),
         })
+    }
+}
+
+fn resolve_workspace_path(tool_path: &str, cwd: &Path) -> PathBuf {
+    let path = PathBuf::from(tool_path);
+    if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
     }
 }
 
@@ -273,6 +278,28 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
     use tempfile::tempdir;
+
+    #[test]
+    fn resolve_workspace_path_keeps_absolute_paths() -> anyhow::Result<()> {
+        let cwd = std::env::current_dir()?;
+        let absolute = cwd.join("codex-rs");
+
+        assert_eq!(
+            resolve_workspace_path(&absolute.to_string_lossy(), &cwd),
+            absolute
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_workspace_path_joins_relative_paths() -> anyhow::Result<()> {
+        let cwd = std::env::current_dir()?;
+        let relative = "codex-rs/core/src";
+        let expected = cwd.join(relative);
+
+        assert_eq!(resolve_workspace_path(relative, &cwd), expected);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn lists_directory_entries() {

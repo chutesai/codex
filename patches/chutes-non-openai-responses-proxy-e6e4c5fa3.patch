@@ -1,0 +1,288 @@
+diff --git a/codex-rs/core/src/models_manager/model_info.rs b/codex-rs/core/src/models_manager/model_info.rs
+index 6a29cd96f..672aacd9e 100644
+--- a/codex-rs/core/src/models_manager/model_info.rs
++++ b/codex-rs/core/src/models_manager/model_info.rs
+@@ -1,3 +1,4 @@
++use codex_protocol::openai_models::ApplyPatchToolType;
+ use codex_protocol::openai_models::ConfigShellToolType;
+ use codex_protocol::openai_models::ModelInfo;
+ use codex_protocol::openai_models::ModelInstructionsVariables;
+@@ -18,6 +19,7 @@ const LOCAL_FRIENDLY_TEMPLATE: &str =
+     "You optimize for team morale and being a supportive teammate as much as code quality.";
+ const LOCAL_PRAGMATIC_TEMPLATE: &str = "You are a deeply pragmatic, effective software engineer.";
+ const PERSONALITY_PLACEHOLDER: &str = "{{ personality }}";
++const FALLBACK_EXPERIMENTAL_TOOLS: [&str; 3] = ["grep_files", "list_dir", "read_file"];
+ 
+ pub(crate) fn with_config_overrides(mut model: ModelInfo, config: &Config) -> ModelInfo {
+     if let Some(supports_reasoning_summaries) = config.model_supports_reasoning_summaries {
+@@ -72,18 +74,26 @@ pub(crate) fn model_info_from_slug(slug: &str) -> ModelInfo {
+         supports_reasoning_summaries: false,
+         support_verbosity: false,
+         default_verbosity: None,
+-        apply_patch_tool_type: None,
++        // Unknown models are frequently third-party and still need core coding tools.
++        apply_patch_tool_type: Some(ApplyPatchToolType::Function),
+         truncation_policy: TruncationPolicyConfig::bytes(10_000),
+-        supports_parallel_tool_calls: false,
++        supports_parallel_tool_calls: true,
+         context_window: Some(272_000),
+         auto_compact_token_limit: None,
+         effective_context_window_percent: 95,
+-        experimental_supported_tools: Vec::new(),
++        experimental_supported_tools: fallback_experimental_supported_tools(),
+         input_modalities: default_input_modalities(),
+         prefer_websockets: false,
+     }
+ }
+ 
++fn fallback_experimental_supported_tools() -> Vec<String> {
++    FALLBACK_EXPERIMENTAL_TOOLS
++        .into_iter()
++        .map(str::to_string)
++        .collect()
++}
++
+ fn local_personality_messages_for_slug(slug: &str) -> Option<ModelMessages> {
+     match slug {
+         "gpt-5.2-codex" | "exp-codex-personality" => Some(ModelMessages {
+@@ -99,3 +109,45 @@ fn local_personality_messages_for_slug(slug: &str) -> Option<ModelMessages> {
+         _ => None,
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use pretty_assertions::assert_eq;
++
++    #[test]
++    fn unknown_model_fallback_enables_proxy_compatible_tools() {
++        let slug = "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8";
++        let model = model_info_from_slug(slug);
++
++        assert_eq!(
++            model,
++            ModelInfo {
++                slug: slug.to_string(),
++                display_name: slug.to_string(),
++                description: None,
++                default_reasoning_level: None,
++                supported_reasoning_levels: Vec::new(),
++                shell_type: ConfigShellToolType::Default,
++                visibility: ModelVisibility::None,
++                supported_in_api: true,
++                priority: 99,
++                upgrade: None,
++                base_instructions: BASE_INSTRUCTIONS.to_string(),
++                model_messages: None,
++                supports_reasoning_summaries: false,
++                support_verbosity: false,
++                default_verbosity: None,
++                apply_patch_tool_type: Some(ApplyPatchToolType::Function),
++                truncation_policy: TruncationPolicyConfig::bytes(10_000),
++                supports_parallel_tool_calls: true,
++                context_window: Some(272_000),
++                auto_compact_token_limit: None,
++                effective_context_window_percent: 95,
++                experimental_supported_tools: fallback_experimental_supported_tools(),
++                input_modalities: default_input_modalities(),
++                prefer_websockets: false,
++            }
++        );
++    }
++}
+diff --git a/codex-rs/core/src/tools/handlers/list_dir.rs b/codex-rs/core/src/tools/handlers/list_dir.rs
+index 5535ce0ba..1e7dd3cc8 100644
+--- a/codex-rs/core/src/tools/handlers/list_dir.rs
++++ b/codex-rs/core/src/tools/handlers/list_dir.rs
+@@ -37,6 +37,7 @@ fn default_depth() -> usize {
+ 
+ #[derive(Deserialize)]
+ struct ListDirArgs {
++    /// Path to the directory to list (absolute or relative to workspace CWD).
+     dir_path: String,
+     #[serde(default = "default_offset")]
+     offset: usize,
+@@ -53,7 +54,7 @@ impl ToolHandler for ListDirHandler {
+     }
+ 
+     async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+-        let ToolInvocation { payload, .. } = invocation;
++        let ToolInvocation { payload, turn, .. } = invocation;
+ 
+         let arguments = match payload {
+             ToolPayload::Function { arguments } => arguments,
+@@ -91,12 +92,7 @@ impl ToolHandler for ListDirHandler {
+             ));
+         }
+ 
+-        let path = PathBuf::from(&dir_path);
+-        if !path.is_absolute() {
+-            return Err(FunctionCallError::RespondToModel(
+-                "dir_path must be an absolute path".to_string(),
+-            ));
+-        }
++        let path = resolve_workspace_path(&dir_path, &turn.cwd);
+ 
+         let entries = list_dir_slice(&path, offset, limit, depth).await?;
+         let mut output = Vec::with_capacity(entries.len() + 1);
+@@ -109,6 +105,15 @@ impl ToolHandler for ListDirHandler {
+     }
+ }
+ 
++fn resolve_workspace_path(tool_path: &str, cwd: &Path) -> PathBuf {
++    let path = PathBuf::from(tool_path);
++    if path.is_absolute() {
++        path
++    } else {
++        cwd.join(path)
++    }
++}
++
+ async fn list_dir_slice(
+     path: &Path,
+     offset: usize,
+@@ -274,6 +279,28 @@ mod tests {
+     use pretty_assertions::assert_eq;
+     use tempfile::tempdir;
+ 
++    #[test]
++    fn resolve_workspace_path_keeps_absolute_paths() -> anyhow::Result<()> {
++        let cwd = std::env::current_dir()?;
++        let absolute = cwd.join("codex-rs");
++
++        assert_eq!(
++            resolve_workspace_path(&absolute.to_string_lossy(), &cwd),
++            absolute
++        );
++        Ok(())
++    }
++
++    #[test]
++    fn resolve_workspace_path_joins_relative_paths() -> anyhow::Result<()> {
++        let cwd = std::env::current_dir()?;
++        let relative = "codex-rs/core/src";
++        let expected = cwd.join(relative);
++
++        assert_eq!(resolve_workspace_path(relative, &cwd), expected);
++        Ok(())
++    }
++
+     #[tokio::test]
+     async fn lists_directory_entries() {
+         let temp = tempdir().expect("create tempdir");
+diff --git a/codex-rs/core/src/tools/handlers/read_file.rs b/codex-rs/core/src/tools/handlers/read_file.rs
+index 59c6ced7f..7cde71b04 100644
+--- a/codex-rs/core/src/tools/handlers/read_file.rs
++++ b/codex-rs/core/src/tools/handlers/read_file.rs
+@@ -1,5 +1,6 @@
+ use codex_protocol::models::FunctionCallOutputBody;
+ use std::collections::VecDeque;
++use std::path::Path;
+ use std::path::PathBuf;
+ 
+ use async_trait::async_trait;
+@@ -25,7 +26,7 @@ const COMMENT_PREFIXES: &[&str] = &["#", "//", "--"];
+ /// JSON arguments accepted by the `read_file` tool handler.
+ #[derive(Deserialize)]
+ struct ReadFileArgs {
+-    /// Absolute path to the file that will be read.
++    /// Path to the file that will be read (absolute or relative to workspace CWD).
+     file_path: String,
+     /// 1-indexed line number to start reading from; defaults to 1.
+     #[serde(default = "defaults::offset")]
+@@ -99,7 +100,7 @@ impl ToolHandler for ReadFileHandler {
+     }
+ 
+     async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+-        let ToolInvocation { payload, .. } = invocation;
++        let ToolInvocation { payload, turn, .. } = invocation;
+ 
+         let arguments = match payload {
+             ToolPayload::Function { arguments } => arguments,
+@@ -132,12 +133,7 @@ impl ToolHandler for ReadFileHandler {
+             ));
+         }
+ 
+-        let path = PathBuf::from(&file_path);
+-        if !path.is_absolute() {
+-            return Err(FunctionCallError::RespondToModel(
+-                "file_path must be an absolute path".to_string(),
+-            ));
+-        }
++        let path = resolve_workspace_path(&file_path, &turn.cwd);
+ 
+         let collected = match mode {
+             ReadMode::Slice => slice::read(&path, offset, limit).await?,
+@@ -153,6 +149,15 @@ impl ToolHandler for ReadFileHandler {
+     }
+ }
+ 
++fn resolve_workspace_path(tool_path: &str, cwd: &Path) -> PathBuf {
++    let path = PathBuf::from(tool_path);
++    if path.is_absolute() {
++        path
++    } else {
++        cwd.join(path)
++    }
++}
++
+ mod slice {
+     use crate::function_tool::FunctionCallError;
+     use crate::tools::handlers::read_file::format_line;
+@@ -491,6 +496,28 @@ mod tests {
+     use pretty_assertions::assert_eq;
+     use tempfile::NamedTempFile;
+ 
++    #[test]
++    fn resolve_workspace_path_keeps_absolute_paths() -> anyhow::Result<()> {
++        let cwd = std::env::current_dir()?;
++        let absolute = cwd.join("Cargo.toml");
++
++        assert_eq!(
++            resolve_workspace_path(&absolute.to_string_lossy(), &cwd),
++            absolute
++        );
++        Ok(())
++    }
++
++    #[test]
++    fn resolve_workspace_path_joins_relative_paths() -> anyhow::Result<()> {
++        let cwd = std::env::current_dir()?;
++        let relative = "codex-rs/core/src/lib.rs";
++        let expected = cwd.join(relative);
++
++        assert_eq!(resolve_workspace_path(relative, &cwd), expected);
++        Ok(())
++    }
++
+     #[tokio::test]
+     async fn reads_requested_range() -> anyhow::Result<()> {
+         let mut temp = NamedTempFile::new()?;
+diff --git a/codex-rs/core/src/tools/spec.rs b/codex-rs/core/src/tools/spec.rs
+index 82e34298c..f73e66317 100644
+--- a/codex-rs/core/src/tools/spec.rs
++++ b/codex-rs/core/src/tools/spec.rs
+@@ -962,7 +962,9 @@ fn create_read_file_tool() -> ToolSpec {
+         (
+             "file_path".to_string(),
+             JsonSchema::String {
+-                description: Some("Absolute path to the file".to_string()),
++                description: Some(
++                    "Path to the file (absolute or relative to workspace CWD)".to_string(),
++                ),
+             },
+         ),
+         (
+@@ -1018,7 +1020,10 @@ fn create_list_dir_tool() -> ToolSpec {
+         (
+             "dir_path".to_string(),
+             JsonSchema::String {
+-                description: Some("Absolute path to the directory to list.".to_string()),
++                description: Some(
++                    "Path to the directory to list (absolute or relative to workspace CWD)."
++                        .to_string(),
++                ),
+             },
+         ),
+         (

@@ -1,5 +1,6 @@
 use codex_protocol::models::FunctionCallOutputBody;
 use std::collections::VecDeque;
+use std::path::Path;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -25,7 +26,7 @@ const COMMENT_PREFIXES: &[&str] = &["#", "//", "--"];
 /// JSON arguments accepted by the `read_file` tool handler.
 #[derive(Deserialize)]
 struct ReadFileArgs {
-    /// Absolute path to the file that will be read.
+    /// Path to the file that will be read (absolute or relative to workspace CWD).
     file_path: String,
     /// 1-indexed line number to start reading from; defaults to 1.
     #[serde(default = "defaults::offset")]
@@ -99,7 +100,7 @@ impl ToolHandler for ReadFileHandler {
     }
 
     async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
-        let ToolInvocation { payload, .. } = invocation;
+        let ToolInvocation { payload, turn, .. } = invocation;
 
         let arguments = match payload {
             ToolPayload::Function { arguments } => arguments,
@@ -132,12 +133,7 @@ impl ToolHandler for ReadFileHandler {
             ));
         }
 
-        let path = PathBuf::from(&file_path);
-        if !path.is_absolute() {
-            return Err(FunctionCallError::RespondToModel(
-                "file_path must be an absolute path".to_string(),
-            ));
-        }
+        let path = resolve_workspace_path(&file_path, &turn.cwd);
 
         let collected = match mode {
             ReadMode::Slice => slice::read(&path, offset, limit).await?,
@@ -150,6 +146,15 @@ impl ToolHandler for ReadFileHandler {
             body: FunctionCallOutputBody::Text(collected.join("\n")),
             success: Some(true),
         })
+    }
+}
+
+fn resolve_workspace_path(tool_path: &str, cwd: &Path) -> PathBuf {
+    let path = PathBuf::from(tool_path);
+    if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
     }
 }
 
@@ -490,6 +495,28 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn resolve_workspace_path_keeps_absolute_paths() -> anyhow::Result<()> {
+        let cwd = std::env::current_dir()?;
+        let absolute = cwd.join("Cargo.toml");
+
+        assert_eq!(
+            resolve_workspace_path(&absolute.to_string_lossy(), &cwd),
+            absolute
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_workspace_path_joins_relative_paths() -> anyhow::Result<()> {
+        let cwd = std::env::current_dir()?;
+        let relative = "codex-rs/core/src/lib.rs";
+        let expected = cwd.join(relative);
+
+        assert_eq!(resolve_workspace_path(relative, &cwd), expected);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn reads_requested_range() -> anyhow::Result<()> {
