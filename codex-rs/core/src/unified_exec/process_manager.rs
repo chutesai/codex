@@ -12,6 +12,7 @@ use tokio::time::Duration;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use crate::codex::Session;
 use crate::exec_env::create_env;
 use crate::exec_policy::ExecApprovalRequest;
 use crate::protocol::ExecCommandSource;
@@ -267,6 +268,7 @@ impl UnifiedExecProcessManager {
     pub(crate) async fn write_stdin(
         &self,
         request: WriteStdinRequest<'_>,
+        session_ref: Arc<Session>,
     ) -> Result<UnifiedExecResponse, UnifiedExecError> {
         let process_id = request.process_id.to_string();
 
@@ -332,6 +334,24 @@ impl UnifiedExecProcessManager {
                 process_id,
             } => (Some(process_id), exit_code, call_id),
             ProcessStatus::Exited { exit_code, entry } => {
+                if !entry.end_event_emitted.swap(true, Ordering::AcqRel) {
+                    let exit = exit_code.unwrap_or(-1);
+                    let duration = Instant::now().saturating_duration_since(entry.started_at);
+                    emit_exec_end_for_unified_exec(
+                        Arc::clone(&session_ref),
+                        Arc::clone(&entry.turn),
+                        entry.call_id.clone(),
+                        entry.command.clone(),
+                        entry.cwd.clone(),
+                        Some(entry.process_id.clone()),
+                        Arc::clone(&entry.transcript),
+                        output.clone(),
+                        exit,
+                        duration,
+                    )
+                    .await;
+                }
+
                 let call_id = entry.call_id.clone();
                 (None, exit_code, call_id)
             }
@@ -366,7 +386,7 @@ impl UnifiedExecProcessManager {
         let exit_code = entry.process.exit_code();
         let process_id = entry.process_id.clone();
 
-        if entry.process.has_exited() {
+        if entry.process.has_exited() || exit_code.is_some() {
             let Some(entry) = store.remove(&process_id) else {
                 return ProcessStatus::Unknown;
             };
@@ -444,9 +464,15 @@ impl UnifiedExecProcessManager {
             call_id: context.call_id.clone(),
             process_id: process_id.clone(),
             command: command.to_vec(),
+            cwd: cwd.clone(),
+            started_at,
+            turn: Arc::clone(&context.turn),
+            transcript: Arc::clone(&transcript),
+            end_event_emitted: Arc::new(AtomicBool::new(false)),
             tty,
             last_used: started_at,
         };
+        let end_event_emitted = Arc::clone(&entry.end_event_emitted);
         let number_processes = {
             let mut store = self.process_store.lock().await;
             Self::prune_processes_if_needed(&mut store);
@@ -473,6 +499,7 @@ impl UnifiedExecProcessManager {
             cwd,
             process_id,
             transcript,
+            end_event_emitted,
             started_at,
         );
     }
@@ -571,7 +598,17 @@ impl UnifiedExecProcessManager {
         cancellation_token: &CancellationToken,
         deadline: Instant,
     ) -> Vec<u8> {
-        const POST_EXIT_CLOSE_WAIT_CAP: Duration = Duration::from_millis(50);
+        // After observing an exit signal, allow a brief grace period for any
+        // final output chunks to be forwarded into the shared buffer. For
+        // long yield times we cap this to keep wall_time reflective of early
+        // exits, but for short yield times we allow using the full remaining
+        // budget to reduce flaky empty output on busy systems.
+        let requested_budget = deadline.saturating_duration_since(Instant::now());
+        let post_exit_close_wait_cap = if requested_budget > Duration::from_secs(2) {
+            Duration::from_millis(50)
+        } else {
+            requested_budget
+        };
 
         let mut collected: Vec<u8> = Vec::with_capacity(4096);
         let mut exit_signal_received = cancellation_token.is_cancelled();
@@ -601,7 +638,7 @@ impl UnifiedExecProcessManager {
                 if exit_signal_received {
                     let now = Instant::now();
                     let close_wait_deadline = *post_exit_deadline
-                        .get_or_insert_with(|| now + remaining.min(POST_EXIT_CLOSE_WAIT_CAP));
+                        .get_or_insert_with(|| now + remaining.min(post_exit_close_wait_cap));
                     let close_wait_remaining = close_wait_deadline.saturating_duration_since(now);
                     if close_wait_remaining == Duration::ZERO {
                         break;

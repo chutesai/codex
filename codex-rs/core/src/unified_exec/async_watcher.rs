@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use tokio::sync::Mutex;
 use tokio::time::Duration;
@@ -112,6 +114,7 @@ pub(crate) fn spawn_exit_watcher(
     cwd: PathBuf,
     process_id: String,
     transcript: Arc<Mutex<HeadTailBuffer>>,
+    end_event_emitted: Arc<AtomicBool>,
     started_at: Instant,
 ) {
     let exit_token = process.cancellation_token();
@@ -119,8 +122,18 @@ pub(crate) fn spawn_exit_watcher(
 
     tokio::spawn(async move {
         exit_token.cancelled().await;
+
+        // write_stdin can detect process exit and emit the end event
+        // synchronously; in that case, avoid waiting for output drains and
+        // emitting a duplicate.
+        if end_event_emitted.load(Ordering::Acquire) {
+            return;
+        }
         output_drained.notified().await;
 
+        if end_event_emitted.swap(true, Ordering::AcqRel) {
+            return;
+        }
         let exit_code = process.exit_code().unwrap_or(-1);
         let duration = Instant::now().saturating_duration_since(started_at);
         emit_exec_end_for_unified_exec(

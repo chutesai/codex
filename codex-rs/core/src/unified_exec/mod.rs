@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use codex_network_proxy::NetworkProxy;
@@ -143,6 +144,11 @@ struct ProcessEntry {
     call_id: String,
     process_id: String,
     command: Vec<String>,
+    cwd: PathBuf,
+    started_at: tokio::time::Instant,
+    turn: Arc<TurnContext>,
+    transcript: Arc<Mutex<head_tail_buffer::HeadTailBuffer>>,
+    end_event_emitted: Arc<AtomicBool>,
     tty: bool,
     last_used: tokio::time::Instant,
 }
@@ -229,12 +235,15 @@ mod tests {
         session
             .services
             .unified_exec_manager
-            .write_stdin(WriteStdinRequest {
-                process_id,
-                input,
-                yield_time_ms,
-                max_output_tokens: None,
-            })
+            .write_stdin(
+                WriteStdinRequest {
+                    process_id,
+                    input,
+                    yield_time_ms,
+                    max_output_tokens: None,
+                },
+                Arc::clone(session),
+            )
             .await
     }
 

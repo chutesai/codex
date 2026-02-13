@@ -208,12 +208,15 @@ impl ToolHandler for UnifiedExecHandler {
             "write_stdin" => {
                 let args: WriteStdinArgs = parse_arguments(&arguments)?;
                 let response = manager
-                    .write_stdin(WriteStdinRequest {
-                        process_id: &args.session_id.to_string(),
-                        input: &args.chars,
-                        yield_time_ms: args.yield_time_ms,
-                        max_output_tokens: args.max_output_tokens,
-                    })
+                    .write_stdin(
+                        WriteStdinRequest {
+                            process_id: &args.session_id.to_string(),
+                            input: &args.chars,
+                            yield_time_ms: args.yield_time_ms,
+                            max_output_tokens: args.max_output_tokens,
+                        },
+                        Arc::clone(&session),
+                    )
                     .await
                     .map_err(|err| {
                         FunctionCallError::RespondToModel(format!("write_stdin failed: {err}"))

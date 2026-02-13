@@ -1235,6 +1235,9 @@ async fn exec_command_reports_chunk_and_exit_metadata() -> Result<()> {
     let call_id = "uexec-metadata";
     let args = serde_json::json!({
         "cmd": "printf 'token one token two token three token four token five token six token seven'",
+        // Avoid user shell startup/profile overhead in tests to keep timing deterministic.
+        "shell": "/bin/sh",
+        "login": false,
         "yield_time_ms": 500,
         "max_output_tokens": 6,
     });
@@ -1525,6 +1528,9 @@ async fn unified_exec_respects_early_exit_notifications() -> Result<()> {
     let call_id = "uexec-early-exit";
     let args = serde_json::json!({
         "cmd": "sleep 0.05",
+        // Avoid user shell startup/profile overhead in tests to keep timing deterministic.
+        "shell": "/bin/sh",
+        "login": false,
         "yield_time_ms": 31415,
     });
 
@@ -2430,6 +2436,9 @@ PY
     let call_id = "uexec-large-output";
     let args = serde_json::json!({
         "cmd": script,
+        // Avoid user shell startup/profile overhead in tests to keep timing deterministic.
+        "shell": "/bin/sh",
+        "login": false,
         "max_output_tokens": 100,
         "yield_time_ms": 500,
     });
@@ -2512,6 +2521,9 @@ async fn unified_exec_runs_under_sandbox() -> Result<()> {
     let call_id = "uexec";
     let args = serde_json::json!({
         "cmd": "echo 'hello'",
+        // Avoid user shell startup/profile overhead in tests to keep timing deterministic.
+        "shell": "/bin/sh",
+        "login": false,
         "yield_time_ms": 500,
     });
 
