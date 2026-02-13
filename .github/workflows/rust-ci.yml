@@ -604,8 +604,10 @@ jobs:
     name: Build nightly binaries — ${{ matrix.runner }} - ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
-    needs: [changed, general, cargo_shear, lint_build, tests]
-    if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push') }}
+    needs: changed
+    # Keep nightly assets publishing decoupled from test outcomes. Tests can be flaky, but
+    # we still want a fresh set of binaries on every push to main.
+    if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push' }}
     defaults:
       run:
         working-directory: codex-rs
