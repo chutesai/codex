@@ -1,4 +1,7 @@
 name: rust-ci
+permissions:
+  contents: write
+  actions: read
 on:
   pull_request: {}
   push:
@@ -86,7 +89,7 @@ jobs:
   # --- CI to validate on different os/targets --------------------------------
   lint_build:
     name: Lint/Build — ${{ matrix.runner }} - ${{ matrix.target }}${{ matrix.profile == 'release' && ' (release)' || '' }}
-    runs-on: ${{ matrix.runs_on || matrix.runner }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     needs: changed
     # Keep job-level if to avoid spinning up runners when not needed
@@ -106,80 +109,50 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-15-xlarge
+          - runner: macos-latest
             target: aarch64-apple-darwin
             profile: dev
-          - runner: macos-15-xlarge
+          - runner: macos-latest
             target: x86_64-apple-darwin
             profile: dev
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-musl
             profile: dev
-            runs_on:
-              group: codex-runners
-              labels: codex-linux-x64
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             profile: dev
-            runs_on:
-              group: codex-runners
-              labels: codex-linux-x64
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             profile: dev
-            runs_on:
-              group: codex-runners
-              labels: codex-linux-arm64
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             profile: dev
-            runs_on:
-              group: codex-runners
-              labels: codex-linux-arm64
-          - runner: windows-x64
+          - runner: windows-latest
             target: x86_64-pc-windows-msvc
             profile: dev
-            runs_on:
-              group: codex-runners
-              labels: codex-windows-x64
-          - runner: windows-arm64
+          - runner: windows-11-arm
             target: aarch64-pc-windows-msvc
             profile: dev
-            runs_on:
-              group: codex-runners
-              labels: codex-windows-arm64
 
           # Also run representative release builds on Mac and Linux because
           # there could be release-only build errors we want to catch.
           # Hopefully this also pre-populates the build cache to speed up
           # releases.
-          - runner: macos-15-xlarge
+          - runner: macos-latest
             target: aarch64-apple-darwin
             profile: release
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-musl
             profile: release
-            runs_on:
-              group: codex-runners
-              labels: codex-linux-x64
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             profile: release
-            runs_on:
-              group: codex-runners
-              labels: codex-linux-arm64
-          - runner: windows-x64
+          - runner: windows-latest
             target: x86_64-pc-windows-msvc
             profile: release
-            runs_on:
-              group: codex-runners
-              labels: codex-windows-x64
-          - runner: windows-arm64
+          - runner: windows-11-arm
             target: aarch64-pc-windows-msvc
             profile: release
-            runs_on:
-              group: codex-runners
-              labels: codex-windows-arm64
 
     steps:
       - uses: actions/checkout@v6
@@ -452,7 +425,7 @@ jobs:
 
   tests:
     name: Tests — ${{ matrix.runner }} - ${{ matrix.target }}
-    runs-on: ${{ matrix.runs_on || matrix.runner }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     needs: changed
     if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push' }}
@@ -469,33 +442,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-15-xlarge
+          - runner: macos-latest
             target: aarch64-apple-darwin
             profile: dev
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             profile: dev
-            runs_on:
-              group: codex-runners
-              labels: codex-linux-x64
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             profile: dev
-            runs_on:
-              group: codex-runners
-              labels: codex-linux-arm64
-          - runner: windows-x64
+          - runner: windows-latest
             target: x86_64-pc-windows-msvc
             profile: dev
-            runs_on:
-              group: codex-runners
-              labels: codex-windows-x64
-          - runner: windows-arm64
+          - runner: windows-11-arm
             target: aarch64-pc-windows-msvc
             profile: dev
-            runs_on:
-              group: codex-runners
-              labels: codex-windows-arm64
 
     steps:
       - uses: actions/checkout@v6
@@ -639,10 +600,158 @@ jobs:
           echo "Tests failed. See logs for details."
           exit 1
 
+  build_binaries:
+    name: Build nightly binaries — ${{ matrix.runner }} - ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    needs: [changed, general, cargo_shear, lint_build, tests]
+    if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && (needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push') }}
+    defaults:
+      run:
+        working-directory: codex-rs
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: codex-macos-aarch64
+          - runner: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: codex-macos-x86_64
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            artifact_name: codex-linux-x86_64-gnu
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            artifact_name: codex-linux-x86_64-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact_name: codex-linux-aarch64-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            artifact_name: codex-linux-aarch64-musl
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: codex-windows-x86_64
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            artifact_name: codex-windows-arm64
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux build dependencies
+        if: ${{ runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
+
+      - if: ${{ matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl'}}
+        name: Install Zig (musl)
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.0
+
+      - if: ${{ matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl'}}
+        name: Install musl build tools (musl)
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          TARGET: ${{ matrix.target }}
+          APT_UPDATE_ARGS: -o Acquire::Retries=3
+          APT_INSTALL_ARGS: --no-install-recommends
+        shell: bash
+        run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
+
+      - name: cargo build (release)
+        shell: bash
+        run: cargo build --target ${{ matrix.target }} --release --bin codex
+
+      - name: Stage binary (Linux/macOS)
+        if: ${{ runner.os != 'Windows' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          dest="artifacts/${{ matrix.artifact_name }}"
+          mkdir -p "$dest"
+          cp "target/${{ matrix.target }}/release/codex" "$dest/codex"
+
+      - name: Stage binary (Windows)
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          $dest = "artifacts/${{ matrix.artifact_name }}"
+          New-Item -ItemType Directory -Path $dest -Force | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/codex.exe" "$dest/codex.exe"
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: codex-rs/artifacts/${{ matrix.artifact_name }}
+
+  publish_release_assets:
+    name: Publish nightly release assets
+    runs-on: ubuntu-24.04
+    needs: build_binaries
+    if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.build_binaries.result == 'success' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Download binary artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: codex-*
+          path: release-artifacts
+          merge-multiple: false
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          shopt -s nullglob
+          count=0
+          for dir in release-artifacts/*; do
+            name="$(basename "$dir")"
+            if [[ -f "$dir/codex.exe" ]]; then
+              cp "$dir/codex.exe" "release-assets/${name}.exe"
+            elif [[ -f "$dir/codex" ]]; then
+              cp "$dir/codex" "release-assets/${name}"
+              chmod +x "release-assets/${name}"
+            else
+              echo "::error::No codex binary found in $dir"
+              exit 1
+            fi
+            count=$((count + 1))
+          done
+          if [[ $count -eq 0 ]]; then
+            echo "::error::No artifacts available to publish."
+            exit 1
+          fi
+      - name: Ensure nightly release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! gh release view nightly >/dev/null 2>&1; then
+            gh release create nightly --prerelease --title "Nightly builds" --notes "Latest successful CI binaries."
+          fi
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release upload nightly release-assets/* --clobber
+
   # --- Gatherer job that you mark as the ONLY required status -----------------
   results:
     name: CI results (required)
-    needs: [changed, general, cargo_shear, lint_build, tests]
+    needs: [changed, general, cargo_shear, lint_build, tests, build_binaries, publish_release_assets]
     if: always()
     runs-on: ubuntu-24.04
     steps:
@@ -653,6 +762,8 @@ jobs:
           echo "shear  : ${{ needs.cargo_shear.result }}"
           echo "lint   : ${{ needs.lint_build.result }}"
           echo "tests  : ${{ needs.tests.result }}"
+          echo "bins   : ${{ needs.build_binaries.result }}"
+          echo "release: ${{ needs.publish_release_assets.result }}"
 
           # If nothing relevant changed (PR touching only root README, etc.),
           # declare success regardless of other jobs.
@@ -666,6 +777,10 @@ jobs:
           [[ '${{ needs.cargo_shear.result }}' == 'success' ]] || { echo 'cargo_shear failed'; exit 1; }
           [[ '${{ needs.lint_build.result }}' == 'success' ]] || { echo 'lint_build failed'; exit 1; }
           [[ '${{ needs.tests.result }}' == 'success' ]] || { echo 'tests failed'; exit 1; }
+          if [[ '${{ github.event_name }}' == 'push' || '${{ github.event_name }}' == 'workflow_dispatch' ]]; then
+            [[ '${{ needs.build_binaries.result }}' == 'success' ]] || { echo 'build_binaries failed'; exit 1; }
+            [[ '${{ needs.publish_release_assets.result }}' == 'success' ]] || { echo 'publish_release_assets failed'; exit 1; }
+          fi
 
       - name: sccache summary note
         if: always()
