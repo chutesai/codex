@@ -64,6 +64,7 @@ use codex_otel::OtelManager;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::Verbosity as VerbosityConfig;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
@@ -448,6 +449,119 @@ impl ModelClient {
 }
 
 impl ModelClientSession {
+    fn provider_is_chutes_responses_proxy(provider: &codex_api::Provider) -> bool {
+        let base_url = provider.base_url.trim_end_matches('/').to_ascii_lowercase();
+        base_url.starts_with("https://responses.chutes.ai")
+            || base_url.starts_with("http://responses.chutes.ai")
+    }
+
+    fn downgrade_developer_messages(provider: &codex_api::Provider, input: &mut [ResponseItem]) {
+        // The Chutes Responses proxy rejects the newer `developer` role used by OpenAI Responses
+        // API, but still accepts `system`.
+        if !Self::provider_is_chutes_responses_proxy(provider) {
+            return;
+        }
+
+        for item in input {
+            if let ResponseItem::Message { role, .. } = item
+                && role == "developer"
+            {
+                *role = "system".to_string();
+            }
+        }
+    }
+
+    fn fold_system_messages_into_instructions(
+        provider: &codex_api::Provider,
+        instructions: &mut String,
+        input: &mut Vec<ResponseItem>,
+    ) {
+        if !Self::provider_is_chutes_responses_proxy(provider) {
+            return;
+        }
+
+        let mut system_messages = Vec::new();
+        input.retain(|item| {
+            let ResponseItem::Message { role, content, .. } = item else {
+                return true;
+            };
+            if role != "system" {
+                return true;
+            }
+
+            let text = content
+                .iter()
+                .filter_map(|item| match item {
+                    ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                        Some(text.as_str())
+                    }
+                    ContentItem::InputImage { .. } => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !text.is_empty() {
+                system_messages.push(text);
+            }
+
+            false
+        });
+
+        if system_messages.is_empty() {
+            return;
+        }
+
+        if !instructions.ends_with('\n') {
+            instructions.push('\n');
+        }
+        for message in system_messages {
+            instructions.push('\n');
+            instructions.push_str(&message);
+            if !instructions.ends_with('\n') {
+                instructions.push('\n');
+            }
+        }
+    }
+
+    fn filter_tools_for_proxy(provider: &codex_api::Provider, tools: &mut Vec<serde_json::Value>) {
+        if !Self::provider_is_chutes_responses_proxy(provider) {
+            return;
+        }
+
+        // Some third-party endpoints only support `function` tools and will either reject or
+        // silently disable structured tool calling when non-function tool types (e.g. `web_search`)
+        // are present.
+        tools.retain(|tool| {
+            tool.get("type")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|ty| ty == "function")
+        });
+    }
+
+    fn append_proxy_tool_call_instructions(
+        provider: &codex_api::Provider,
+        instructions: &mut String,
+    ) {
+        if !Self::provider_is_chutes_responses_proxy(provider) {
+            return;
+        }
+
+        // Many OpenAI-compatible backends (and responses proxies) surface tool calls as plain text
+        // instead of structured `function_call` output items. Ensure a stable tag format that
+        // clients can parse.
+        instructions.push_str(
+            r#"
+
+Tool calls (important):
+- When you need to call a tool, output ONLY one or more blocks in this exact format:
+  <function=TOOL_NAME>
+  json
+  {...}
+- Do not use the format <function>TOOL_NAME</function>.
+- Do not add any other text outside the <function=...> blocks.
+"#,
+        );
+    }
+
     fn activate_http_fallback(&self, websocket_enabled: bool) -> bool {
         websocket_enabled
             && !self
@@ -465,9 +579,13 @@ impl ModelClientSession {
         effort: Option<ReasoningEffortConfig>,
         summary: ReasoningSummaryConfig,
     ) -> Result<ResponsesApiRequest> {
-        let instructions = &prompt.base_instructions.text;
-        let input = prompt.get_formatted_input();
-        let tools = create_tools_json_for_responses_api(&prompt.tools)?;
+        let mut instructions = prompt.base_instructions.text.clone();
+        let mut input = prompt.get_formatted_input();
+        Self::downgrade_developer_messages(provider, &mut input);
+        Self::fold_system_messages_into_instructions(provider, &mut instructions, &mut input);
+        Self::append_proxy_tool_call_instructions(provider, &mut instructions);
+        let mut tools = create_tools_json_for_responses_api(&prompt.tools)?;
+        Self::filter_tools_for_proxy(provider, &mut tools);
         let default_reasoning_effort = model_info.default_reasoning_level;
         let reasoning = if model_info.supports_reasoning_summaries {
             Some(Reasoning {
@@ -504,7 +622,7 @@ impl ModelClientSession {
         let prompt_cache_key = Some(self.client.state.conversation_id.to_string());
         let request = ResponsesApiRequest {
             model: model_info.slug.clone(),
-            instructions: instructions.clone(),
+            instructions,
             input,
             tools,
             tool_choice: "auto".to_string(),
@@ -1162,13 +1280,19 @@ impl WebsocketTelemetry for ApiTelemetry {
 #[cfg(test)]
 mod tests {
     use super::ModelClient;
+    use super::ModelClientSession;
+    use codex_api::provider::RetryConfig;
     use codex_otel::OtelManager;
     use codex_protocol::ThreadId;
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ResponseItem;
     use codex_protocol::openai_models::ModelInfo;
     use codex_protocol::protocol::SessionSource;
     use codex_protocol::protocol::SubAgentSource;
+    use http::HeaderMap;
     use pretty_assertions::assert_eq;
     use serde_json::json;
+    use std::time::Duration;
 
     fn test_model_client(session_source: SessionSource) -> ModelClient {
         let provider = crate::model_provider_info::create_oss_provider_with_base_url(
@@ -1256,5 +1380,247 @@ mod tests {
             .await
             .expect("empty summarize request should succeed");
         assert_eq!(output.len(), 0);
+    }
+
+    #[test]
+    fn downgrades_developer_messages_for_non_openai_base_urls() {
+        let provider = codex_api::Provider {
+            name: "proxy".to_string(),
+            base_url: "https://responses.chutes.ai/v1".to_string(),
+            query_params: None,
+            headers: HeaderMap::new(),
+            retry: RetryConfig {
+                max_attempts: 1,
+                base_delay: Duration::from_millis(1),
+                retry_429: false,
+                retry_5xx: false,
+                retry_transport: false,
+            },
+            stream_idle_timeout: Duration::from_secs(30),
+        };
+
+        let mut items = vec![
+            ResponseItem::Message {
+                id: None,
+                role: "developer".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "dev".to_string(),
+                }],
+                end_turn: None,
+                phase: None,
+            },
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "user".to_string(),
+                }],
+                end_turn: None,
+                phase: None,
+            },
+        ];
+
+        ModelClientSession::downgrade_developer_messages(&provider, &mut items);
+
+        let ResponseItem::Message { role, .. } = &items[0] else {
+            panic!("expected message item");
+        };
+        assert_eq!(role, "system");
+
+        let ResponseItem::Message { role, .. } = &items[1] else {
+            panic!("expected message item");
+        };
+        assert_eq!(role, "user");
+    }
+
+    #[test]
+    fn keeps_developer_messages_for_openai_base_urls() {
+        let provider = codex_api::Provider {
+            name: "openai".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            query_params: None,
+            headers: HeaderMap::new(),
+            retry: RetryConfig {
+                max_attempts: 1,
+                base_delay: Duration::from_millis(1),
+                retry_429: false,
+                retry_5xx: false,
+                retry_transport: false,
+            },
+            stream_idle_timeout: Duration::from_secs(30),
+        };
+
+        let mut items = vec![ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "dev".to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+        }];
+
+        ModelClientSession::downgrade_developer_messages(&provider, &mut items);
+
+        let ResponseItem::Message { role, .. } = &items[0] else {
+            panic!("expected message item");
+        };
+        assert_eq!(role, "developer");
+    }
+
+    #[test]
+    fn folds_system_messages_into_instructions_for_non_openai_base_urls() {
+        let provider = codex_api::Provider {
+            name: "proxy".to_string(),
+            base_url: "https://responses.chutes.ai/v1".to_string(),
+            query_params: None,
+            headers: HeaderMap::new(),
+            retry: RetryConfig {
+                max_attempts: 1,
+                base_delay: Duration::from_millis(1),
+                retry_429: false,
+                retry_5xx: false,
+                retry_transport: false,
+            },
+            stream_idle_timeout: Duration::from_secs(30),
+        };
+
+        let mut instructions = "base".to_string();
+        let mut input = vec![
+            ResponseItem::Message {
+                id: None,
+                role: "system".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "sys".to_string(),
+                }],
+                end_turn: None,
+                phase: None,
+            },
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "user".to_string(),
+                }],
+                end_turn: None,
+                phase: None,
+            },
+        ];
+
+        ModelClientSession::fold_system_messages_into_instructions(
+            &provider,
+            &mut instructions,
+            &mut input,
+        );
+
+        assert!(instructions.contains("sys"));
+        assert_eq!(input.len(), 1);
+        let ResponseItem::Message { role, .. } = &input[0] else {
+            panic!("expected message item");
+        };
+        assert_eq!(role, "user");
+    }
+
+    #[test]
+    fn keeps_system_messages_in_input_for_openai_base_urls() {
+        let provider = codex_api::Provider {
+            name: "openai".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            query_params: None,
+            headers: HeaderMap::new(),
+            retry: RetryConfig {
+                max_attempts: 1,
+                base_delay: Duration::from_millis(1),
+                retry_429: false,
+                retry_5xx: false,
+                retry_transport: false,
+            },
+            stream_idle_timeout: Duration::from_secs(30),
+        };
+
+        let mut instructions = "base".to_string();
+        let mut input = vec![ResponseItem::Message {
+            id: None,
+            role: "system".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "sys".to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+        }];
+
+        ModelClientSession::fold_system_messages_into_instructions(
+            &provider,
+            &mut instructions,
+            &mut input,
+        );
+
+        assert_eq!(instructions, "base");
+        assert_eq!(input.len(), 1);
+        let ResponseItem::Message { role, .. } = &input[0] else {
+            panic!("expected message item");
+        };
+        assert_eq!(role, "system");
+    }
+
+    #[test]
+    fn filters_non_function_tools_for_non_openai_base_urls() {
+        let provider = codex_api::Provider {
+            name: "proxy".to_string(),
+            base_url: "https://responses.chutes.ai/v1".to_string(),
+            query_params: None,
+            headers: HeaderMap::new(),
+            retry: RetryConfig {
+                max_attempts: 1,
+                base_delay: Duration::from_millis(1),
+                retry_429: false,
+                retry_5xx: false,
+                retry_transport: false,
+            },
+            stream_idle_timeout: Duration::from_secs(30),
+        };
+
+        let mut tools = vec![
+            json!({"type":"function","function":{"name":"shell"}}),
+            json!({"type":"web_search"}),
+            json!({"type":"file_search"}),
+            json!({}),
+        ];
+
+        ModelClientSession::filter_tools_for_proxy(&provider, &mut tools);
+
+        assert_eq!(
+            tools,
+            vec![json!({"type":"function","function":{"name":"shell"}})]
+        );
+    }
+
+    #[test]
+    fn keeps_non_function_tools_for_openai_base_urls() {
+        let provider = codex_api::Provider {
+            name: "openai".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            query_params: None,
+            headers: HeaderMap::new(),
+            retry: RetryConfig {
+                max_attempts: 1,
+                base_delay: Duration::from_millis(1),
+                retry_429: false,
+                retry_5xx: false,
+                retry_transport: false,
+            },
+            stream_idle_timeout: Duration::from_secs(30),
+        };
+
+        let mut tools = vec![
+            json!({"type":"function","function":{"name":"shell"}}),
+            json!({"type":"web_search"}),
+            json!({"type":"file_search"}),
+            json!({}),
+        ];
+
+        ModelClientSession::filter_tools_for_proxy(&provider, &mut tools);
+
+        assert_eq!(tools.len(), 4);
     }
 }

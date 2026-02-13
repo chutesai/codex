@@ -5387,7 +5387,7 @@ async fn try_run_sampling_request(
                 let output_result = handle_output_item_done(&mut ctx, item, previously_active_item)
                     .instrument(handle_responses)
                     .await?;
-                if let Some(tool_future) = output_result.tool_future {
+                for tool_future in output_result.tool_futures {
                     in_flight.push_back(tool_future);
                 }
                 if let Some(agent_message) = output_result.last_agent_message {
