@@ -603,7 +603,7 @@ jobs:
   build_binaries:
     name: Build nightly binaries — ${{ matrix.runner }} - ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     needs: changed
     # Keep nightly assets publishing decoupled from test outcomes. Tests can be flaky, but
     # we still want a fresh set of binaries on every push to main.
@@ -611,6 +611,10 @@ jobs:
     defaults:
       run:
         working-directory: codex-rs
+    env:
+      # Nightly binaries prioritize turnaround time over maximum optimization.
+      CARGO_PROFILE_RELEASE_LTO: thin
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
     strategy:
       fail-fast: false
       matrix:
