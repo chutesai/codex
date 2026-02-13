@@ -1,5 +1,5 @@
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index bbf9b26c9..1dce541cd 100644
+index ec0d1e54f..19a8f9181 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
 @@ -64,6 +64,7 @@ use codex_otel::OtelManager;
@@ -10,7 +10,7 @@ index bbf9b26c9..1dce541cd 100644
  use codex_protocol::models::ResponseItem;
  use codex_protocol::openai_models::ModelInfo;
  use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
-@@ -445,6 +446,119 @@ impl ModelClient {
+@@ -448,6 +449,119 @@ impl ModelClient {
  }
  
  impl ModelClientSession {
@@ -130,7 +130,7 @@ index bbf9b26c9..1dce541cd 100644
      fn activate_http_fallback(&self, websocket_enabled: bool) -> bool {
          websocket_enabled
              && !self
-@@ -462,9 +576,13 @@ impl ModelClientSession {
+@@ -465,9 +579,13 @@ impl ModelClientSession {
          effort: Option<ReasoningEffortConfig>,
          summary: ReasoningSummaryConfig,
      ) -> Result<ResponsesApiRequest> {
@@ -147,7 +147,7 @@ index bbf9b26c9..1dce541cd 100644
          let default_reasoning_effort = model_info.default_reasoning_level;
          let reasoning = if model_info.supports_reasoning_summaries {
              Some(Reasoning {
-@@ -501,7 +619,7 @@ impl ModelClientSession {
+@@ -504,7 +622,7 @@ impl ModelClientSession {
          let prompt_cache_key = Some(self.client.state.conversation_id.to_string());
          let request = ResponsesApiRequest {
              model: model_info.slug.clone(),
@@ -156,7 +156,7 @@ index bbf9b26c9..1dce541cd 100644
              input,
              tools,
              tool_choice: "auto".to_string(),
-@@ -1159,13 +1277,19 @@ impl WebsocketTelemetry for ApiTelemetry {
+@@ -1162,13 +1280,19 @@ impl WebsocketTelemetry for ApiTelemetry {
  #[cfg(test)]
  mod tests {
      use super::ModelClient;
@@ -176,7 +176,7 @@ index bbf9b26c9..1dce541cd 100644
  
      fn test_model_client(session_source: SessionSource) -> ModelClient {
          let provider = crate::model_provider_info::create_oss_provider_with_base_url(
-@@ -1254,4 +1378,246 @@ mod tests {
+@@ -1257,4 +1381,246 @@ mod tests {
              .expect("empty summarize request should succeed");
          assert_eq!(output.len(), 0);
      }
